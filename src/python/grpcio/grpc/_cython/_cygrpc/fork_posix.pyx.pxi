@@ -13,6 +13,9 @@
 # limitations under the License.
 
 import os
+import sysconfig
+import contextlib
+import threading
 
 _AWAIT_THREADS_TIMEOUT_SECONDS = 5
 
@@ -67,11 +70,15 @@ cdef void __postfork_child() noexcept nogil:
             # A thread in return_from_user_request_generator() may hold this lock
             # when fork occurs.
             _fork_state.active_thread_count = _ActiveThreadCount()
-            for state_to_reset in _fork_state.postfork_states_to_reset:
+            with _fork_state.lock if _fork_state.lock is not None else contextlib.nullcontext():
+                states_to_reset = list(_fork_state.postfork_states_to_reset)
+                _fork_state.postfork_states_to_reset.clear()
+            for state_to_reset in states_to_reset:
                 state_to_reset.reset_postfork_child()
-            _fork_state.postfork_states_to_reset = []
             _fork_state.fork_epoch += 1
-            for channel in _fork_state.channels:
+            with _fork_state.lock if _fork_state.lock is not None else contextlib.nullcontext():
+                channels_to_close = set(_fork_state.channels)
+            for channel in channels_to_close:
                 channel._close_on_fork()
             with _fork_state.fork_in_progress_condition:
                 _fork_state.fork_in_progress = False
@@ -133,7 +140,8 @@ def block_if_fork_in_progress(postfork_state_to_reset=None):
             if not _fork_state.fork_in_progress:
                 return
             if postfork_state_to_reset is not None:
-                _fork_state.postfork_states_to_reset.append(postfork_state_to_reset)
+                with _fork_state.lock if _fork_state.lock is not None else contextlib.nullcontext():
+                    _fork_state.postfork_states_to_reset.append(postfork_state_to_reset)
             _fork_state.active_thread_count.decrement()
             _fork_state.fork_in_progress_condition.wait()
             _fork_state.active_thread_count.increment()
@@ -160,12 +168,14 @@ def is_fork_support_enabled():
 
 def fork_register_channel(channel):
     if _GRPC_ENABLE_FORK_SUPPORT:
-        _fork_state.channels.add(channel)
+        with _fork_state.lock if _fork_state.lock is not None else contextlib.nullcontext():
+            _fork_state.channels.add(channel)
 
 
 def fork_unregister_channel(channel):
     if _GRPC_ENABLE_FORK_SUPPORT:
-        _fork_state.channels.discard(channel)
+        with _fork_state.lock if _fork_state.lock is not None else contextlib.nullcontext():
+            _fork_state.channels.discard(channel)
 
 
 class _ActiveThreadCount(object):
@@ -210,6 +220,7 @@ class _ForkState(object):
         self.active_thread_count = _ActiveThreadCount()
         self.fork_epoch = 0
         self.channels = set()
+        self.lock = threading.Lock() if sysconfig.get_config_var("Py_GIL_DISABLED") else None
 
 
 _fork_state = _ForkState()
