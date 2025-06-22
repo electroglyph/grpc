@@ -19,6 +19,9 @@ from functools import partial
 import inspect
 import logging
 import traceback
+import contextlib
+import sysconfig
+import threading
 from typing import (
     Any,
     AsyncIterator,
@@ -213,15 +216,18 @@ class Call:
         self._metadata = tuple(metadata)
         self._request_serializer = request_serializer
         self._response_deserializer = response_deserializer
+        self._lock = threading.Lock() if sysconfig.get_config_var("Py_GIL_DISABLED") else None
 
     def __del__(self) -> None:
         # The '_cython_call' object might be destructed before Call object
-        if hasattr(self, "_cython_call"):
-            if not self._cython_call.done():
-                self._cancel(_GC_CANCELLATION_DETAILS)
+        with self._lock if self._lock else contextlib.nullcontext():
+            if hasattr(self, "_cython_call"):
+                if not self._cython_call.done():
+                    self._cancel(_GC_CANCELLATION_DETAILS)
 
     def cancelled(self) -> bool:
-        return self._cython_call.cancelled()
+        with self._lock if self._lock else contextlib.nullcontext():
+            return self._cython_call.cancelled()
 
     def _cancel(self, details: str) -> bool:
         """Forwards the application cancellation reasoning."""
@@ -232,7 +238,8 @@ class Call:
             return False
 
     def cancel(self) -> bool:
-        return self._cancel(_LOCAL_CANCELLATION_DETAILS)
+        with self._lock if self._lock else contextlib.nullcontext():
+            return self._cancel(_LOCAL_CANCELLATION_DETAILS)
 
     def done(self) -> bool:
         return self._cython_call.done()

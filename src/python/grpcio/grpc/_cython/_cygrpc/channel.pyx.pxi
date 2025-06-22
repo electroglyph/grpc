@@ -13,6 +13,9 @@
 # limitations under the License.
 
 from grpc import _observability
+import sysconfig
+import contextlib
+import threading
 
 _INTERNAL_CALL_ERROR_MESSAGE_FORMAT = (
     'Internal gRPC call error %d. ' +
@@ -508,6 +511,7 @@ cdef class Channel:
     self._state.c_channel = grpc_channel_create(
         <char *>target, c_channel_credentials, channel_args.c_args())
     self._registered_call_handles = {}
+    self._lock = threading.Lock() if sysconfig.get_config_var("Py_GIL_DISABLED") else None
     grpc_channel_credentials_release(c_channel_credentials)
 
   def target(self):
@@ -578,6 +582,7 @@ cdef class Channel:
     Returns:
       The registered call handle pointer in the form of a Python Long. 
     """
-    if method not in self._registered_call_handles.keys():
-      self._registered_call_handles[method] = CallHandle(self._state, method)
-    return self._registered_call_handles[method].call_handle
+    with self._lock if self._lock else contextlib.nullcontext():
+      if method not in self._registered_call_handles.keys():
+        self._registered_call_handles[method] = CallHandle(self._state, method)
+      return self._registered_call_handles[method].call_handle
